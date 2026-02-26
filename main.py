@@ -1,23 +1,42 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams
 
-app = FastAPI(title="RFP Assistant API")
+# Connect to the local Qdrant instance running in Docker
+qdrant_client = QdrantClient(host="localhost", port=6333)
+COLLECTION_NAME = "rfp_documents"
 
-# A simple data model defining the expected input
+# Modern FastAPI lifespan context manager replacing on_event("startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup execution: Ensure the vector collection exists
+    collections = qdrant_client.get_collections().collections
+    if not any(c.name == COLLECTION_NAME for c in collections):
+        qdrant_client.create_collection(
+            collection_name=COLLECTION_NAME,
+            # nomic-embed-text outputs vectors with 768 dimensions
+            vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+        )
+    yield
+    # Shutdown execution would go here if needed
+
+# Initialize FastAPI with the lifespan handler
+app = FastAPI(title="RFP Assistant API", lifespan=lifespan)
+
 class TextInput(BaseModel):
     text: str
 
-# A test endpoint to check if the API is reachable
 @app.get("/")
 def read_root():
     return {"status": "API is running", "message": "Ready to process RFPs"}
 
-# The endpoint where n8n will send the data later
 @app.post("/process-text")
 def process_text(input_data: TextInput):
-    # Logic for the vector database and AI will be added here later
+    # Subsequent implementation will route text to Ollama and store the resulting vector
     return {
         "status": "success",
         "received_text": input_data.text,
-        "message": "Text received by Python Backend"
+        "message": "Text received by Python Backend. Qdrant collection is ready."
     }
