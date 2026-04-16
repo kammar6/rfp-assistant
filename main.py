@@ -6,6 +6,7 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 import fitz  # library to read pdfs
 import httpx # we need this to make async calls to our local ollama server
 import uuid  # using this to generate unique ids for the database entries
+import hashlib
 
 # connect to the qdrant container
 qdrant_client = QdrantClient(host="localhost", port=6333)
@@ -27,6 +28,10 @@ app = FastAPI(title="RFP Assistant API", lifespan=lifespan)
 
 class TextInput(BaseModel):
     text: str
+
+class SearchQuery(BaseModel):
+    question: str
+    limit: int = 3 # default to returning the top 3 matches
 
 # helper function to split text into overlapping chunks
 # the overlap prevents us from cutting a sentence in half
@@ -88,12 +93,16 @@ async def upload_pdf(file: UploadFile = File(...)):
         
         # go through every chunk and get its vector from ollama
         for chunk in document_chunks:
-            # this might take a few seconds depending on the gpu
             vector = await get_embedding(chunk)
             
-            # create a qdrant data point with a random id, the vector, and the text payload
+            # create a deterministic ID based on the text content
+            # if we upload the exact same text again, it generates the same ID and overwrites
+            chunk_hash = hashlib.md5(chunk.encode("utf-8")).hexdigest()
+            deterministic_id = str(uuid.UUID(chunk_hash))
+            
+            # create a qdrant data point
             point = PointStruct(
-                id=str(uuid.uuid4()), 
+                id=deterministic_id, 
                 vector=vector,
                 payload={"text": chunk, "source_file": file.filename}
             )
@@ -115,3 +124,34 @@ async def upload_pdf(file: UploadFile = File(...)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+    
+@app.post("/search")
+async def search_documents(query: SearchQuery):
+    try:
+        # step 1: turn the user's question into a math vector using ollama
+        question_vector = await get_embedding(query.question)
+
+        # step 2: ask qdrant to find the chunks closest to our question vector
+        # using the new query_points function since search() got removed in the new update
+        search_results = qdrant_client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=question_vector, 
+            limit=query.limit
+        ).points # we have to grab the .points list from the response object
+
+        # step 3: clean up the output so it is easy to read
+        matches = []
+        for hit in search_results:
+            matches.append({
+                "confidence_score": hit.score, # higher is better (closer to 1.0)
+                "text": hit.payload["text"],
+                "source": hit.payload["source_file"]
+            })
+
+        return {
+            "status": "success",
+            "question": query.question, 
+            "matches": matches
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
