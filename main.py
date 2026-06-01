@@ -33,6 +33,11 @@ class SearchQuery(BaseModel):
     question: str
     limit: int = 3 # default to returning the top 3 matches
 
+class AskQuery(BaseModel):
+    question: str
+    limit: int = 3
+    model: str = "qwen3.5:9b"
+
 # helper function to split text into overlapping chunks
 # the overlap prevents us from cutting a sentence in half
 def get_text_chunks(text: str, chunk_size: int = 1000, overlap: int = 200):
@@ -61,6 +66,25 @@ async def get_embedding(text: str) -> list[float]:
         
         # parse the json and grab the embedding array
         return response.json()["embedding"]
+
+async def generate_answer(context_chunks: list[str], question: str, model: str) -> str:
+    context = "\n\n---\n\n".join(context_chunks)
+    prompt = (
+        f"You are an expert assistant helping answer questions about RFP documents.\n"
+        f"Use ONLY the excerpts below to answer the question. "
+        f"If the answer is not contained in the excerpts, say so clearly.\n\n"
+        f"Excerpts:\n{context}\n\n"
+        f"Question: {question}\n\n"
+        f"Answer:"
+    )
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=120.0
+        )
+        response.raise_for_status()
+        return response.json()["response"]
 
 @app.get("/")
 def read_root():
@@ -155,3 +179,33 @@ async def search_documents(query: SearchQuery):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+@app.post("/ask")
+async def ask_question(query: AskQuery):
+    try:
+        question_vector = await get_embedding(query.question)
+
+        search_results = qdrant_client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=question_vector,
+            limit=query.limit
+        ).points
+
+        if not search_results:
+            raise HTTPException(status_code=404, detail="No relevant documents found.")
+
+        context_chunks = [hit.payload["text"] for hit in search_results]
+        sources = list({hit.payload["source_file"] for hit in search_results})
+
+        answer = await generate_answer(context_chunks, query.question, query.model)
+
+        return {
+            "status": "success",
+            "question": query.question,
+            "answer": answer,
+            "sources": sources,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
