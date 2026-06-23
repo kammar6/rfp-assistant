@@ -209,3 +209,41 @@ async def ask_question(query: AskQuery):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
+
+@app.get("/documents")
+def list_documents():
+    try:
+        # tally up how many chunks belong to each source file
+        counts: dict[str, int] = {}
+        next_offset = None
+
+        # scroll through the whole collection in batches until there is nothing left
+        while True:
+            points, next_offset = qdrant_client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=256,
+                offset=next_offset,
+                with_payload=True,
+                with_vectors=False  # we only need the metadata, not the heavy vectors
+            )
+
+            for point in points:
+                source = point.payload.get("source_file", "unknown")
+                counts[source] = counts.get(source, 0) + 1
+
+            # when qdrant has no more pages it returns a null offset
+            if next_offset is None:
+                break
+
+        documents = [
+            {"source_file": source, "chunk_count": count}
+            for source, count in counts.items()
+        ]
+
+        return {
+            "status": "success",
+            "total_documents": len(documents),
+            "documents": documents
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")

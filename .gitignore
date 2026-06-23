@@ -9,4 +9,4 @@ qdrant_data/
 __pycache__/
 *.pyc
 venv/
-.venv/
+.venv/shared_docs/
